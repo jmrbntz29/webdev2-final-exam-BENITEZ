@@ -1,0 +1,17 @@
+Public function up() 
+
+{
+Schema::create (‘Bible study form function  (Blueprint $table) {
+$table->id();
+$table->timestamp();
+$table->string(‘full name’) ;
+$table->string(‘email address ’);
+$table->string(‘contact number’);
+$table->string(‘birthdate’);
+$table->string(‘religion affiliation ’ );
+$table->string(‘Bible study date );
+$table->string(‘Bible study time);
+$table->string(‘Bible study address ‘);
+
+}) 
+} 
