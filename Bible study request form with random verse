@@ -1,0 +1,62 @@
+function check(Request $request){
+
+        $request->validate([
+            ‘email’=>’required|email’,
+            ‘password’=>’required|min:6|max:16’,
+        ]);
+
+
+        $userInfo = Admin::where(‘email’, ‘=’, $request->email)->first();
+
+        If(!$userInfo){
+            Return back()->with(‘fail’, ‘We do not recognize your email address’);
+        }
+        Else {
+            If(Hash::check($request->password, $userInfo->passsword)){
+                $request->session()->put(‘LoggedUser’, $userInfo->id);
+                Return redirect(‘admin/dashboard’);
+            }
+
+            Else {
+                Return back()->with(‘fail’, ‘Incorrect password’);
+            }
+        }
+    }
+
+
+<div id=”ourmanna-verse”>
+	<div id=”mannaverse-container”>
+		<p id=”mannaverse”>
+			Fear not, for I am with you; be not dismayed, for I am your God; I will strengthen you, I will help you, I will uphold you with my righteous right hand.		</p>
+		<p id=”mannaverse-reference”>
+			Isaiah 41:10
+
+			<small id=”mannaverse-version”><i>(NIV)</i></small>
+		</p>
+	</div>
+</div>
+
+#ourmanna-verse {
+    Padding: 10px;
+    Margin:10px;
+    Background: rgba(0, 0, 0, 0.3);
+    Border-color: rgba(0, 0, 0, 0.3);
+    -webkit-border-radius: 5px;
+    -moz-border-radius: 5px;
+    Border-radius: 5px;
+}
+#mannaverse {
+    Font-size: 14px;
+    Font-weight: bold;
+    Margin-bottom: 10px;
+}
+#mannaverse-reference:before {
+    Content: “- “;
+}
+#mannaverse-reference {
+    Text-align: right;
+    Font-size: 12px;
+}
+#mannaverse-version {
+    Color: #ddd;
+}
