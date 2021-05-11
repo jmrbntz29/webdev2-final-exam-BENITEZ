@@ -1,0 +1,580 @@
+	<?php namespace BibleExperience\Http\Controllers;
+
+Use BibleExperience\Http\Requests;
+Use BibleExperience\Http\Controllers\Controller;
+Use BibleExperience\BibleBook;
+Use BibleExperience\BibleVerse;
+Use BibleExperience\BibleHighlight;
+Use BibleExperience\Course;
+Use BibleExperience\Image;
+Use BibleExperience\Page;
+
+Use BibleExperience\Study;
+Use BibleExperience\StudyFetcher;
+
+Use BibleExperience\Task;
+Use BibleExperience\TaskProperty;
+Use BibleExperience\TaskType;
+Use BibleExperience\UserRepository;
+Use BibleExperience\Http\Requests\CreateBEStudyRequest;
+Use BibleExperience\Http\Requests\UpdateBEStudyRequest;
+Use BibleExperience\Http\Requests\UploadMarkdownRequest;
+Use BibleExperience\Commands\CreateBEStudyCommand;
+Use BibleExperience\Commands\UpdateBEStudyCommand;
+Use BibleExperience\Helpers\Helpers as Helper;
+Use Illuminate\Http\Request;
+Use Auth, View, Input, Flash, Markdown, Redirect, Session, stdClass; 
+Use Illuminate\Pagination\LengthAwarePaginator;
+
+Class StudiesController extends Controller {
+	
+	Function __construct(UserRepository $userRepository){
+		
+		$this->middleware(‘be.editor’, [‘except’ => [‘index’,’show’,’studySpace’,’showTag’,’goToStudy’,’userIndex’,’create’,’store’,’uploadTextFile’]]);
+		$this->middleware(‘auth’, [‘only’ => [‘create’,’store’,’uploadTextFile’]]);
+		
+		$path_array = \Route::current()->parameters();
+		
+		$fetch = new StudyFetcher($path_array);
+
+		$page = new Page;
+		$page->make($fetch->study);
+
+		$this->page = $page;
+		$this->study = $fetch->study;
+		
+		$this->pathArray = $path_array;
+		$this->userRepository = $userRepository;
+	}
+	
+	/**
+	 * Display a listing of the resource.
+	 *
+	 * @return Response
+	 */
+	Public function index()
+	{
+
+		$page = $this->page;
+		$study = $this->study;
+		$studies = Study::orderBy(‘updated_at’, ‘DESC’)->public()->paginate(9);
+		$courses = Course::where(‘public’,’1’)->get();
+		
+		Return view(‘studies.index’,compact(‘page’,’study’,’studies’,’courses’));
+	}
+	
+	Public function userIndex($username)
+	{
+		$user = $this->userRepository->findByUsername($username);
+
+		$studies = $user->studies()->public()->paginate(9);
+
+		Return view(‘users.studies.index-public’,compact(‘studies’,’user’));
+	}
+	
+	Public function create()
+	{
+	
+		$page = $this->page;
+		$study = $this->study;
+		$creating = true;
+	
+		$form = new \stdClass();
+		$form->title = $study->title;
+		$form->body = null;
+		$form->comment = null;
+		$form->description = null;
+	
+		If(Input::old(‘text’) !== null){
+				
+			$form->body = Input::old(‘text’);
+			$form->title = Input::old(‘title’);
+			$form->comment = Input::old(‘comment’);
+			$form->description = Input::old(‘description’);
+				
+		}else if (\Session::has(‘body’)){
+				
+			$file_array = explode(‘=@’,\Session::get(‘body’));
+				
+			If(count($file_array) >= 2){
+	
+				Foreach($file_array AS $b){
+					$temp = explode(‘:’, $b,2);
+						
+					If(isset($temp[1])){
+						$index = $temp[0];
+						$content = $temp[1];
+						$form->$index = $content;
+					}
+						
+				}
+	
+			}else{
+				$form->body = \Session::get(‘body’);
+			}
+				
+		}
+	
+		Return view(‘studies.create’,compact(‘page’,’study’,’creating’,’form’));
+	
+	}
+	
+	/**
+	 * Store a newly created resource in storage.
+	 *
+	 * @return Response
+	 */
+	Public function store(CreateBEStudyRequest $request)
+	{
+
+		$description = Input::get(‘description’);
+		$title = Input::get(‘title’);
+		$text = Input::get(‘text’);
+		$comment = Input::get(‘comment’);
+		$minor_edit = Input::get(‘minor_edit’);
+		
+		$study = $this->dispatch(new CreateBEStudyCommand($description,$title,Auth::user()->id, $text, $comment, $minor_edit));
+		 
+		Flash::success(‘This study has begun!’);
+		
+		Return Redirect::to($study->editUrl());
+		
+	}
+	
+	Public function uploadTextFile(UploadMarkdownRequest $request)
+	{
+		
+	  	$file = Input::file(‘file’);
+	  
+	  	If ($file->isValid()){
+	  		
+	  		$destinationPath = public_path().’/uploads’; // upload path
+		    $extension = Input::file(‘file’)->getClientOriginalExtension(); // getting image extension
+		    $fileName = rand(11111,99999).’.’.$extension; // renameing image
+		    
+		    $file->move($destinationPath, $fileName); // uploading file to given path
+		     
+		    Flash::success(‘Uploaded successfully’); 
+		    
+		    Return Redirect::back()->with(‘body’,file_get_contents(public_path().’/uploads/’.$fileName));
+	  	}
+	  	
+	  	Flash::error(‘File couldn\’t be uploaded’);
+	  	
+	  	Return Redirect::back();
+
+	}
+	
+	/**
+	 * Display the specified resource.
+	 *
+	 * @param  int  $id
+	 * @return Response
+	 */
+	Public function show()
+	{
+		
+		$page = $this->page;
+		$study = $this->study;
+
+		If ($study->exists && $study->isPublic()){
+			
+			$page->title = $study->present()->title;
+			$article = $study->published_html;
+			
+			Return view(‘studies.show’,compact(‘article’,’page’,’study’));
+		}
+		
+		$similarStudies = Study::searchForSimilar($this->pathArray[‘studythis’]);
+		
+		If(empty($similarStudies)){
+			
+			Flash::message(‘No public studies match your request.’);
+		}
+		
+		$similarStudies = $this->paginateResults($similarStudies, 6);
+		
+		Return view(‘studies.does-not-exist’,compact(‘page’,’study’,’similarStudies’));
+		
+	}
+	
+	Public function studySpace($study,$titleSlug)
+	{
+		
+		$bible = false;
+		$booksOftheBible = [];
+		
+		
+		If($study->mainVerse !== null){
+			$currentReference = $study->mainVerse->reference;
+		}else if(Session::has(‘last_scripture’)){
+		
+			$currentReference = Session::get(‘last_scripture_readable’);
+				
+		}else{
+			
+			$currentReference = ‘John 1’;
+			
+		}
+
+		If($currentReference !== null){
+			
+			$chapter = BibleVerse::isValidReference($currentReference)->chapter;
+			
+			$booksOftheBible = BibleBook::all();
+			$recent_chapters = [null];
+			
+			If($chapter !== false){
+				$bible = true;
+				$currentReference = $chapter->reference;
+
+			}
+			
+		}
+		
+		$page = $this->page;
+		$study = $this->study;
+		
+		$highlight_colors = BibleHighlight::getColors();
+		
+		If ($study->exists && $study->isPublic()){
+			
+			$page->title = $study->present()->title;
+			$article = $study->published_html;
+
+		}else{
+			
+			$study = new Study;
+			
+			Flash::message(‘I could not find that study!’);
+		}
+
+		$data_path = ‘/api/v1/views/bible/chapter/’;
+		$data_path_search = ‘/api/v1/bible/search/’;
+		
+		Return view(‘studies.show’,compact(‘article’,’data_path’,’data_path_search’,’page’,’study’, ‘bible’,’chapter’,’highlight_colors’,’currentReference’,’booksOftheBible’,’recent_chapters’));
+		
+	}
+	
+	Public function showTag($tag)
+	{
+		
+		$page = $this->page;
+		
+		
+		$study = $this->study;
+		
+		$similarStudies = Study::whereHas(‘tags’, function($q) use ($tag)
+							{
+							    $q->where(‘name’, ‘like’, $tag.’%’);
+							
+							})->paginate(6);
+	
+		If(empty($similarStudies)){
+				
+			Flash::message(‘No public studies match your request.’);
+		}
+		
+		$page->title = ‘(‘ . $similarStudies->total() . ‘) Studies Tagged “’. $page->title .’”’;
+		
+		Return view(‘studies.tagged’,compact(‘page’,’study’,’similarStudies’, ‘tag’));
+	
+	}
+	
+	Public function preview()
+	{
+	
+		$page = $this->page;
+		$study = $this->study;
+	
+		If ($study->exists){
+			$page->title = ‘[PREVIEW] ‘.$study->present()->title;
+			
+			$article = nl2br(Markdown::convertToHtml($study->text()->text));
+			
+			Return view(‘studies.preview’,compact(‘article’,’page’,’study’));
+		}
+	}
+	
+	Public function goToStudy(){
+	
+		$query = $_POST[‘query’];
+		
+		If($query !== “”){
+		
+			Return \Redirect::to(Helper::userTitletoUrl($query));
+		} else {
+			
+			Return \Redirect::to(‘/study’);
+		}
+	
+	}
+	
+	/**
+	 * Show the form for editing the specified resource.
+	 *
+	 * @param  int  $id
+	 * @return Response
+	 */
+	Public function edit($study)
+	{
+		
+		$page = $this->page;
+		$study = $this->study;
+		Session::put(‘last_edited_study_id’,$study->id);
+		$study_tags_string = Helper::arrayToCommaString($study->tags);
+		
+		$task_types = TaskType::where(‘name’,’test’)->get()->lists(‘name’,’id’);
+		
+		$form = new \stdClass();
+		$form->title = $page->title;
+		
+		If($study->text() === null){
+			$form->body = null;
+		} else {
+			$form->body = $study->text()->text;
+		}
+		$form->comment = $study->comment;
+		$form->description = $study->description;
+		
+		If(Input::old(‘text’) !== null){
+				
+			$form->body = Input::old(‘text’);
+			$form->comment = Input::old(‘comment’);
+			$form->description = Input::old(‘description’);
+				
+		}else if (\Session::has(‘body’)){
+				
+			$file_array = explode(‘=@’,\Session::get(‘body’));
+				
+			If(count($file_array) >= 2){
+				
+				$exclude_these = [‘description’,’title’];
+				
+				Foreach($file_array AS $b){
+					$temp = explode(‘:’, $b,2);
+						
+					If(isset($temp[1]) && ! in_array($temp[0],$exclude_these)){
+						$index = $temp[0];
+						$content = $temp[1];
+						$form->$index = $content;
+					}
+						
+				}
+		
+			}else{
+				$form->body = \Session::get(‘body’);
+			}
+				
+		}
+
+		Return view(‘studies.edit’,compact(‘page’,’study’,’form’,’study_tags_string’,’task_types’));
+	}
+
+	/**
+	 * Update the specified resource in storage.
+	 *
+	 * @param  int  $id
+	 * @return Response
+	 */
+	Public function update(UpdateBEStudyRequest $request)
+	{
+
+		$study = $this->study;
+		
+		$text = Input::get(‘text’);
+
+		If(Input::get(‘translate_verses’) >= 1){
+			$text = Helper::convertReferences($text);
+		}
+		
+		$comment = Input::get(‘comment’);
+		$minor_edit = Input::get(‘minor_edit’);
+		
+		$study = $this->dispatch(new UpdateBEStudyCommand($study, Auth::user()->id, $text, $comment, $minor_edit));
+
+		Flash::success(‘Your changes were saved!’);
+		
+		Return \Redirect::back();
+	}
+	
+	Public function updateTitle(){
+	
+		$study = $this->study;
+		$study->title= Helper::userTitleToUrl(Input::get(‘title’));
+	
+		If($study->title !== null){
+			$study->save();
+			Flash::success(‘Your changes were saved!’);
+			Return Redirect::to($study->url());
+		} else {
+			Flash::error(‘your change could not be saved!’);
+			Return Redirect::back();
+		}
+	
+		
+	}
+	
+	Public function updateMainVerse(){
+		
+		$study = $this->study;
+		$study->main_verse = BibleVerse::referenceTranslator(Input::get(‘main_verse’))[0];
+		
+		If($study->main_verse !== null){
+			$study->save();
+			Flash::success(‘Your changes were saved!’);
+		} else {
+			Flash::error(‘not a valid Scripture reference!’);
+		}
+		
+		Return Redirect::back();
+	}
+	
+	Public function updateDescription(){
+	
+		$study = $this->study;
+		$study->description = Input::get(‘description’);
+	
+		If($study->description !== null){
+			$study->save();
+			Flash::success(‘Your changes were saved!’);
+		} else {
+			Flash::error(‘Your changes couldn\’t be saved!’);
+		}
+	
+		Return Redirect::back();
+	}
+	
+	Public function updateStudyIcon(){
+		
+		$file = Input::file(‘file’);
+	  	
+	  	If ($file->isValid()){
+	  		
+	  		//Get the Context of the Image
+	  		$study = Study::find($this->study->id);
+	  		
+	  		//Get Unique String
+	  		$uuid = str_replace([‘ ‘,’.’],’’,microtime());
+	  		
+	  		//Place Image
+	  		$destinationPath = public_path().’/images/uploads’; // upload path
+		    $extension = Input::file(‘file’)->getClientOriginalExtension(); // getting image extension
+		    $fileName = $uuid.’.’.$extension; // renameing image
+		    $file->move($destinationPath, $fileName); // uploading file to given path
+		    
+		    //Enter Image into Database
+		    $dbImage = new Image;
+		    $dbImage->name = $uuid.’.’.$extension;
+		    $dbImage->src = url(‘/images/uploads/’.$fileName);
+		    $dbImage->alt_text = $study->present()->title;
+	 		$dbImage->bible_verse_id = $this->study->mainVerse->id;
+	 		$dbImage->user_id = Auth::user()->id;
+		    $dbImage->save();
+		    
+		    //Set Image as Default Image for Study
+		    $study->image_id = $dbImage->id;
+		    $study->save();
+		    
+		    //Notify User of Success
+		    Flash::success(‘Uploaded successfully’);
+			
+		    Return Redirect::back();
+	  	}
+		
+	  	Flash::error(‘File couldn\’t be uploaded’);
+	  	
+	  	Return Redirect::back();
+	  	
+	}
+	
+	Protected function paginateResults(array $results, $perPage = 0)
+	{
+		
+		$page = Input::get(‘page’);
+		
+		$index = $page-1;
+		If($page <= 0){
+			$index = 0;
+		}
+		
+		If(empty($results)){
+			$pagedResults[0] = null;
+		}else{
+			$pagedResults = array_chunk($results, $perPage);
+		}
+	
+		Return new LengthAwarePaginator($pagedResults[$index], count($results), $perPage, $page,
+		[
+            ‘path’  => \Request::url()
+        ]);
+		
+	}
+	
+	Public function detachRecording(){
+		
+		//!!
+		//Create Validation for request
+		//!!
+		
+		$study = Study::find(Input::get(‘study_id’));
+		$study->recordings()->detach(Input::get(‘recording_id’));
+		
+		Flash::success(‘Successfully removed recording with #’.Input::get(‘recording_id’));
+		
+		Return Redirect::back();
+	}
+
+	Public function publish($study)
+	{
+
+		$study->publish();
+		$study->save();
+	
+		Return Redirect::back();
+	}
+	
+	Public function storeTask($study){
+	
+		$type = Input::get(‘task_type’);
+	
+		$orderBy = $study->tasks->count() + 1;
+	
+		$count = $study->tasks()->where(‘task_type_id’,$type)->count() + 1;
+		
+		$task = $study->tasks()->create([
+				‘task_type_id’=> $type,
+				‘orderBy’=> $orderBy,
+				‘title’=> ‘#’ . $count
+		]);
+	
+		Flash::success(‘Task Created.’);
+
+		Return Redirect::to(‘/user/study-maker/256/task/’.$task->id.’/edit’);
+	}
+	
+	Public function editTask($study, $task){
+	
+		$task = $task->buildEditor();
+		
+		$page = new stdClass();
+		$page->title = ‘Builder’;
+
+		Return view($task->templates->edit, compact(‘study’,’task’,’page’));
+	
+	}
+	
+	Public function updateTask($study, $task)
+	{
+	
+		$task->update([
+				‘title’=> Input::get(‘title’),
+				‘instructions’=> Input::get(‘instructions’),
+				‘points’=>Input::get(‘points’)
+		]);
+	
+		Flash::success(‘Your changes were saved.’);
+	
+		Return Redirect::back();
+	}
+	
